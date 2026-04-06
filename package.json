@@ -1,0 +1,20 @@
+{
+  "name": "tri-asset-amm-mvp",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "contracts",
+    "scripts",
+    "frontend"
+  ],
+  "scripts": {
+    "bootstrap": "npm install --workspaces",
+    "build:contracts": "npm run build -w contracts",
+    "fund:testnet": "npm run fund:testnet -w scripts",
+    "deploy:testnet": "npm run deploy:testnet -w contracts",
+    "create:asas": "npm run create:asas -w scripts",
+    "init:pool": "npm run init:pool -w scripts",
+    "swap:test": "npm run swap:test -w scripts",
+    "dev:frontend": "npm run dev -w frontend"
+  }
+}

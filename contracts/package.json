@@ -1,0 +1,21 @@
+{
+  "name": "contracts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "algokit compile ts src --out-dir artifacts --output-source-map",
+    "deploy:testnet": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config deploy/deploy.ts",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@algorandfoundation/algorand-typescript": "~1.0.0-beta.25 <1.0.0"
+  },
+  "devDependencies": {
+    "@algorandfoundation/algokit-utils": "^9.0.0",
+    "@algorandfoundation/algokit-utils-debug": "^1.0.4",
+    "@algorandfoundation/puya-ts": "~1.0.0-beta.50 <1.0.0",
+    "dotenv": "^16.6.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}
