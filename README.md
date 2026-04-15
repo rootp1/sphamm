@@ -46,31 +46,34 @@ Swap validation for `swap_exact_in`:
 Simplified deterministic integer math (round down only):
 
 1. `amountInAfterFee = floor(amountIn * (10000 - feeBps) / 10000)`
-2. Pairwise projection using reserves of selected input/output assets:
-   - `k = reserveIn * reserveOut`
-   - `newReserveOut = floor(k / (reserveIn + amountInAfterFee))`
+2. Orbital-style geometric invariant:
+   - `K = reserveA^2 + reserveB^2 + reserveC^2`
+3. For a swap `assetIn -> assetOut` with third reserve fixed:
+   - `newReserveIn = reserveIn + amountInAfterFee`
+   - `newReserveOut = floor(sqrt(K - newReserveIn^2 - reserveThird^2))`
    - `amountOut = reserveOut - newReserveOut`
-3. Require `amountOut >= minAmountOut`
-4. Update reserves and send output ASA via inner tx
+4. Require `amountOut >= minAmountOut`
+5. Update reserves and send output ASA via inner tx
 
-## AMM Model Explanation
+## Orbital-Inspired AMM
 
-This MVP uses a practical 3-asset approximation model:
+This MVP uses a geometric invariant approximation inspired by orbital/spherical AMMs:
 
-- Pairwise pricing for swap quotes and execution (`reserveIn`/`reserveOut` constant-product step)
-- Global 3-asset invariant validation after each swap (`K_global = reserveA * reserveB * reserveC`)
+- Invariant: `K = A^2 + B^2 + C^2`
+- All assets influence price, including single-input/single-output swaps
+- Contract solves output reserve via integer square root on-chain
 
-Why this design:
+Why this differs from constant-product:
 
-- Keeps computation light and deterministic for AVM limits
-- Preserves simple exact-input UX and existing transaction flow
-- Adds unified-pool consistency checks so post-swap state is globally coherent
+- No pairwise `x*y=k` solve is used
+- Swap output is derived from global 3-asset geometry
+- Third asset reserve directly constrains each swap quote
 
-Invariant behavior:
+Limitations (intentional MVP scope):
 
-- Contract computes `K_before` and simulated `K_after`
-- Swap is rejected if `K_after` decreases beyond rounding tolerance
-- This approximates spherical/holistic 3-asset behavior while staying MVP-friendly
+- Integer-only (uint64) math with floor rounding
+- No ticks, concentrated ranges, or dynamic curvature controls
+- Simplified fee handling and no LP share accounting yet
 
 ## Prerequisites
 

@@ -6,7 +6,8 @@
     "fund:testnet": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/fund-testnet.ts",
     "create:asas": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/create-asas.ts",
     "init:pool": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/init-pool.ts",
-    "swap:test": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/swap-test.ts"
+    "swap:test": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/swap-test.ts",
+    "validate:e2e": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/validate-e2e.ts"
   },
   "dependencies": {
     "@algorandfoundation/algokit-utils": "^9.0.0",

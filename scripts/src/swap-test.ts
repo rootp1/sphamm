@@ -10,7 +10,7 @@ function readUintState(globalState: any[], key: string): number {
 }
 
 function globalInvariant(a: number, b: number, c: number): bigint {
-  return BigInt(a) * BigInt(b) * BigInt(c)
+  return BigInt(a) * BigInt(a) + BigInt(b) * BigInt(b) + BigInt(c) * BigInt(c)
 }
 
 async function main() {
@@ -35,7 +35,7 @@ async function main() {
   console.log(`reserveA=${reserveABefore}`)
   console.log(`reserveB=${reserveBBefore}`)
   console.log(`reserveC=${reserveCBefore}`)
-  console.log(`K_global_before=${invariantBefore}`)
+  console.log(`K_orbital_before=${invariantBefore}`)
 
   const appAddress = algosdk.getApplicationAddress(appId)
   const sp = await getSuggestedParams(algod)
@@ -63,7 +63,7 @@ async function main() {
     appIndex: BigInt(appId),
     appArgs,
     foreignAssets: [assetBId],
-    suggestedParams: { ...sp, fee: 2_000n },
+    suggestedParams: { ...sp, fee: 5_000n },
   })
 
   algosdk.assignGroupID([tx0, tx1])
@@ -84,7 +84,7 @@ async function main() {
   console.log(`reserveA=${reserveAAfter}`)
   console.log(`reserveB=${reserveBAfter}`)
   console.log(`reserveC=${reserveCAfter}`)
-  console.log(`K_global_after=${invariantAfter}`)
+  console.log(`K_orbital_after=${invariantAfter}`)
 }
 
 main().catch((err) => {

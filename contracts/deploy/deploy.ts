@@ -32,7 +32,7 @@ async function main() {
     approvalProgram: new Uint8Array(Buffer.from(approvalCompiled.result, 'base64')),
     clearProgram: new Uint8Array(Buffer.from(clearCompiled.result, 'base64')),
     appArgs: [createMethod.getSelector()],
-    numGlobalInts: 8,
+    numGlobalInts: 9,
     numGlobalByteSlices: 1,
     numLocalInts: 0,
     numLocalByteSlices: 0,

@@ -7,6 +7,7 @@ import {
   GlobalState,
   gtxn,
   itxn,
+  op,
   Txn,
 } from '@algorandfoundation/algorand-typescript'
 
@@ -90,17 +91,21 @@ export class TriAssetAmm extends Contract {
 
   public quote_swap_exact_in(assetInId: uint64, amountIn: uint64): uint64 {
     assert(this.assetAId.value > 0, 'pool not initialized')
+    assert(this.reserveA.value > 0 && this.reserveB.value > 0 && this.reserveC.value > 0, 'pool assets not active')
     assert(amountIn > 0, 'amountIn must be positive')
     assert(Txn.numAssets >= 1, 'missing output asset')
 
     const assetOutId = Txn.assets(0).id
+    assert(this.isPoolAsset(assetInId), 'assetIn unsupported')
+    assert(this.isPoolAsset(assetOutId), 'assetOut unsupported')
     assert(assetOutId !== assetInId, 'same asset pair invalid')
 
     const amountInAfterFee = this.applyFee(amountIn)
     const reserveIn = this.getReserveByAssetId(assetInId)
     const reserveOut = this.getReserveByAssetId(assetOutId)
-
-    return this.computeAmountOut(reserveIn, reserveOut, amountInAfterFee)
+    const reserveThird = this.getThirdReserveByAssetIds(assetInId, assetOutId)
+    const [amountOut] = this.solveOrbitalSwap(reserveIn, reserveOut, reserveThird, amountInAfterFee)
+    return amountOut
   }
 
   public swap_exact_in(assetInId: uint64, amountIn: uint64, minAmountOut: uint64): uint64 {
@@ -123,25 +128,22 @@ export class TriAssetAmm extends Contract {
     assert(this.isPoolAsset(assetOutId), 'assetOut unsupported')
     assert(assetOutId !== assetInId, 'output asset must differ')
 
-    const kBefore = this.computeGlobalK(this.reserveA.value, this.reserveB.value, this.reserveC.value)
-
     const amountInAfterFee = this.applyFee(amountIn)
     const reserveIn = this.getReserveByAssetId(assetInId)
     const reserveOut = this.getReserveByAssetId(assetOutId)
+    const reserveThird = this.getThirdReserveByAssetIds(assetInId, assetOutId)
 
-    const amountOut = this.computeAmountOut(reserveIn, reserveOut, amountInAfterFee)
+    const [amountOut, newReserveIn, newReserveOut] = this.solveOrbitalSwap(
+      reserveIn,
+      reserveOut,
+      reserveThird,
+      amountInAfterFee,
+    )
 
     assert(amountOut >= minAmountOut, 'slippage exceeded')
     assert(amountOut > 0, 'amountOut zero')
     assert(amountOut < reserveOut, 'output would drain reserve')
-    assert(reserveOut > amountOut, 'reserve underflow')
-
-    const newReserveIn: uint64 = reserveIn + amountIn
-    const newReserveOut: uint64 = reserveOut - amountOut
-    const [simA, simB, simC] = this.mapReservesAfterSwap(assetInId, assetOutId, newReserveIn, newReserveOut)
-    const kAfter = this.computeGlobalK(simA, simB, simC)
-
-    assert(kAfter >= kBefore || kBefore - kAfter <= 1, 'global invariant violated')
+    assert(reserveOut >= amountOut, 'reserve underflow')
 
     this.setReserveByAssetId(assetInId, newReserveIn)
     this.setReserveByAssetId(assetOutId, newReserveOut)
@@ -199,44 +201,64 @@ export class TriAssetAmm extends Contract {
     return (amountIn * feeFactor) / 10_000
   }
 
-  private computeAmountOut(reserveIn: uint64, reserveOut: uint64, amountInAfterFee: uint64): uint64 {
-    assert(reserveIn > 0 && reserveOut > 0, 'empty reserves')
-    const newReserveIn: uint64 = reserveIn + amountInAfterFee
-    const k: uint64 = reserveIn * reserveOut
-    const newReserveOut: uint64 = k / newReserveIn
-    const amountOut: uint64 = reserveOut - newReserveOut
-    return amountOut
-  }
-
-  private computeGlobalK(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
-    const ab: uint64 = reserveA * reserveB
-    assert(reserveB === 0 || ab / reserveB === reserveA, 'k overflow')
-
-    const abc: uint64 = ab * reserveC
-    assert(reserveC === 0 || abc / reserveC === ab, 'k overflow')
-
-    return abc
-  }
-
-  private mapReservesAfterSwap(
-    assetInId: uint64,
-    assetOutId: uint64,
-    newReserveIn: uint64,
-    newReserveOut: uint64,
+  private solveOrbitalSwap(
+    reserveIn: uint64,
+    reserveOut: uint64,
+    reserveThird: uint64,
+    amountInAfterFee: uint64,
   ): [uint64, uint64, uint64] {
-    let nextA: uint64 = this.reserveA.value
-    let nextB: uint64 = this.reserveB.value
-    let nextC: uint64 = this.reserveC.value
+    assert(reserveIn > 0 && reserveOut > 0 && reserveThird > 0, 'empty reserves')
 
-    if (assetInId === this.assetAId.value) nextA = newReserveIn
-    if (assetInId === this.assetBId.value) nextB = newReserveIn
-    if (assetInId === this.assetCId.value) nextC = newReserveIn
+    const kBefore = this.computeOrbitalInvariant(reserveIn, reserveOut, reserveThird)
+    const newReserveIn: uint64 = reserveIn + amountInAfterFee
+    assert(newReserveIn >= reserveIn, 'reserve overflow')
 
-    if (assetOutId === this.assetAId.value) nextA = newReserveOut
-    if (assetOutId === this.assetBId.value) nextB = newReserveOut
-    if (assetOutId === this.assetCId.value) nextC = newReserveOut
+    const newReserveInSq = this.safeSquare(newReserveIn)
+    const reserveThirdSq = this.safeSquare(reserveThird)
 
-    return [nextA, nextB, nextC]
+    assert(kBefore >= newReserveInSq, 'invariant exhausted by input')
+    const remainingAfterInput: uint64 = kBefore - newReserveInSq
+    assert(remainingAfterInput >= reserveThirdSq, 'invariant exhausted by third reserve')
+
+    const targetOutSq: uint64 = remainingAfterInput - reserveThirdSq
+    const newReserveOut: uint64 = this.sqrtFloor(targetOutSq)
+
+    assert(reserveOut >= newReserveOut, 'invalid output reserve')
+    const amountOut: uint64 = reserveOut - newReserveOut
+    return [amountOut, newReserveIn, newReserveOut]
+  }
+
+  private computeOrbitalInvariant(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
+    const reserveASq = this.safeSquare(reserveA)
+    const reserveBSq = this.safeSquare(reserveB)
+    const reserveCSq = this.safeSquare(reserveC)
+
+    const sumAB: uint64 = reserveASq + reserveBSq
+    assert(sumAB >= reserveASq, 'invariant overflow')
+    const sumABC: uint64 = sumAB + reserveCSq
+    assert(sumABC >= sumAB, 'invariant overflow')
+
+    return sumABC
+  }
+
+  private safeSquare(value: uint64): uint64 {
+    const squared: uint64 = value * value
+    assert(value === 0 || squared / value === value, 'square overflow')
+    return squared
+  }
+
+  private sqrtFloor(value: uint64): uint64 {
+    return op.sqrt(value)
+  }
+
+  private getThirdReserveByAssetIds(assetInId: uint64, assetOutId: uint64): uint64 {
+    assert(this.isPoolAsset(assetInId), 'assetIn unsupported')
+    assert(this.isPoolAsset(assetOutId), 'assetOut unsupported')
+    assert(assetInId !== assetOutId, 'asset ids must differ')
+
+    if (assetInId !== this.assetAId.value && assetOutId !== this.assetAId.value) return this.reserveA.value
+    if (assetInId !== this.assetBId.value && assetOutId !== this.assetBId.value) return this.reserveB.value
+    return this.reserveC.value
   }
 
   private getReserveByAssetId(assetId: uint64): uint64 {
