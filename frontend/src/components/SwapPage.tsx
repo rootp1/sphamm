@@ -106,6 +106,11 @@ export default function SwapPage() {
     })
   }, [wallets])
 
+  const configuredAssets = useMemo(() => assets.filter((asset) => asset.id > 0), [])
+  const hasConfigError = !appId || configuredAssets.length !== 3
+  const configErrorMessage =
+    'Missing frontend env config. Set NEXT_PUBLIC_AMM_APP_ID and NEXT_PUBLIC_ASSET_A_ID/B_ID/C_ID in Vercel.'
+
   const estimateOut = useMemo(() => quoteLocal(pool, assetInId, assetOutId, amountIn), [pool, assetInId, assetOutId, amountIn])
   const hydratedAddress = mounted ? activeAddress : null
   const hydratedWallets = mounted ? sortedWallets : []
@@ -115,8 +120,8 @@ export default function SwapPage() {
   const executionPrice = amountIn > 0 ? estimateOut / amountIn : 0
   const priceImpactPct = spotPrice > 0 ? Math.max(0, ((spotPrice - executionPrice) / spotPrice) * 100) : 0
   const missingOptIns = useMemo(
-    () => assets.filter((asset) => !optedAssetIds.includes(asset.id)),
-    [optedAssetIds],
+    () => configuredAssets.filter((asset) => !optedAssetIds.includes(asset.id)),
+    [configuredAssets, optedAssetIds],
   )
   const inputAssetBalance = walletAssetBalances[assetInId] ?? 0
 
@@ -187,6 +192,7 @@ export default function SwapPage() {
   }
 
   async function optInMissingAssets() {
+    if (hasConfigError) throw new Error(configErrorMessage)
     if (!activeAddress) throw new Error('Connect wallet first')
     if (missingOptIns.length === 0) {
       setStatus('All pool assets already opted in')
@@ -227,12 +233,12 @@ export default function SwapPage() {
     await algosdk.waitForConfirmation(algod, txid, 4)
 
     setStatus(`Asset opt-ins confirmed for ${signerAddress}: ${txid}`)
-    await waitForWalletOptIns(signerAddress, assets.map((asset) => asset.id))
+    await waitForWalletOptIns(signerAddress, configuredAssets.map((asset) => asset.id))
     await loadWalletAssetOptIns()
 
     const postInfo = await algod.accountInformation(signerAddress).do()
     const postAssetIds = new Set((postInfo.assets ?? []).map((asset: any) => readAssetId(asset)).filter((id: number) => id > 0))
-    const stillMissing = assets.filter((asset) => !postAssetIds.has(asset.id))
+    const stillMissing = configuredAssets.filter((asset) => !postAssetIds.has(asset.id))
     if (stillMissing.length > 0) {
       throw new Error(
         `Opt-in was processed for ${signerAddress}, but still missing IDs: ${stillMissing.map((a) => a.id).join(', ')}`,
@@ -243,6 +249,7 @@ export default function SwapPage() {
   }
 
   async function swap() {
+    if (hasConfigError) throw new Error(configErrorMessage)
     if (!activeAddress) throw new Error('Connect wallet first')
     const signerAddress = activeAddress
     if (!amountIn || amountIn <= 0) throw new Error('Enter valid amount')
@@ -321,10 +328,10 @@ export default function SwapPage() {
 
   useEffect(() => {
     if (assetInId === assetOutId) {
-      const fallback = assets.find((a) => a.id !== assetInId)
+      const fallback = configuredAssets.find((a) => a.id !== assetInId)
       if (fallback) setAssetOutId(fallback.id)
     }
-  }, [assetInId, assetOutId])
+  }, [assetInId, assetOutId, configuredAssets])
 
   const pricePreview = estimateOut > 0 ? (estimateOut / Math.max(amountIn, 1)).toFixed(6) : '0'
 
@@ -335,6 +342,7 @@ export default function SwapPage() {
       <p>Orbital-style invariant: A² + B² + C²</p>
 
       <div className="card">
+        {hasConfigError && <div className="warning">{configErrorMessage}</div>}
         <div className="grid">
           <select value={selectedWalletId} onChange={(e) => setSelectedWalletId(e.target.value)}>
             <option value="">Auto (Lute → Pera → others)</option>
@@ -369,7 +377,7 @@ export default function SwapPage() {
           <div>
             <label>Input Asset</label>
             <select value={assetInId} onChange={(e) => setAssetInId(Number(e.target.value))}>
-              {assets.map((a) => (
+              {configuredAssets.map((a) => (
                 <option key={a.id} value={a.id}>{a.symbol} ({a.id})</option>
               ))}
             </select>
@@ -377,7 +385,7 @@ export default function SwapPage() {
           <div>
             <label>Output Asset</label>
             <select value={assetOutId} onChange={(e) => setAssetOutId(Number(e.target.value))}>
-              {assets.filter((a) => a.id !== assetInId).map((a) => (
+              {configuredAssets.filter((a) => a.id !== assetInId).map((a) => (
                 <option key={a.id} value={a.id}>{a.symbol} ({a.id})</option>
               ))}
             </select>
