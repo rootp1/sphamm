@@ -93,6 +93,8 @@ export default function SwapPage() {
   const [lastSigningAddress, setLastSigningAddress] = useState<string>('')
   const [status, setStatus] = useState<string>('')
   const [mounted, setMounted] = useState(false)
+  const [fundAmount, setFundAmount] = useState<number>(10)
+  const [fundingAssetId, setFundingAssetId] = useState<number | null>(null)
 
   const preferredWalletOrder = [WalletId.LUTE, WalletId.PERA, WalletId.DEFLY, WalletId.EXODUS]
 
@@ -314,6 +316,36 @@ export default function SwapPage() {
     await loadPool()
   }
 
+  async function fundConnectedWallet(assetId: number) {
+    if (!activeAddress) throw new Error('Connect wallet first')
+    if (!Number.isInteger(fundAmount) || fundAmount <= 0) throw new Error('Fund amount must be a positive integer')
+
+    setFundingAssetId(assetId)
+    try {
+      setStatus(`Funding wallet with asset ${assetId}...`)
+
+      const response = await fetch('/api/faucet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiver: activeAddress,
+          assetId,
+          amount: fundAmount,
+        }),
+      })
+
+      const payload = (await response.json()) as { txid?: string; error?: string }
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Faucet transfer failed')
+      }
+
+      setStatus(`Funded ${fundAmount} units of ${assetId}. Tx: ${payload.txid}`)
+      await loadWalletAssetOptIns()
+    } finally {
+      setFundingAssetId(null)
+    }
+  }
+
   useEffect(() => {
     loadPool().catch((e) => setStatus(e.message))
   }, [])
@@ -358,6 +390,25 @@ export default function SwapPage() {
             {missingOptIns.length > 0 ? `Opt-in missing assets (${missingOptIns.length})` : 'All assets opted in'}
           </button>
           <button className="secondary" onClick={loadPool}>Refresh Pool</button>
+        </div>
+        <div className="grid" style={{ marginTop: 10 }}>
+          <input
+            type="number"
+            min={1}
+            value={fundAmount}
+            onChange={(e) => setFundAmount(Number(e.target.value))}
+            placeholder="Fund amount"
+          />
+          {configuredAssets.map((asset) => (
+            <button
+              key={`fund-${asset.id}`}
+              className="secondary"
+              onClick={() => fundConnectedWallet(asset.id).catch((e) => setStatus(e.message))}
+              disabled={fundingAssetId === asset.id}
+            >
+              {fundingAssetId === asset.id ? `Funding ${asset.symbol}...` : `Fund ${asset.symbol}`}
+            </button>
+          ))}
         </div>
         {hydratedAddress && (
           <div style={{ marginTop: 10 }}>
