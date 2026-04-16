@@ -286,7 +286,7 @@ export default function SwapPage() {
       appIndex: BigInt(appId),
       appArgs: [swapMethod.getSelector(), encodeU64(assetInId), encodeU64(amountIn), encodeU64(minAmountOut)],
       foreignAssets: [assetOutId],
-      suggestedParams: { ...sp, fee: 5000n },
+      suggestedParams: { ...sp, fee: 5000n, flatFee: true },
     })
 
     algosdk.assignGroupID([tx0, tx1])
