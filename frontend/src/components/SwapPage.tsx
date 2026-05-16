@@ -28,24 +28,68 @@ function quoteLocal(pool: PoolState, inId: number, outId: number, amountIn: numb
   const reserveThird = pickReserve(pool, third)
   if (reserveIn <= 0 || reserveOut <= 0 || reserveThird <= 0) return 0
 
-  const amountInAfterFee = Math.floor((amountIn * (10000 - pool.feeBps)) / 10000)
+  const q = quoteLocalDetailed(reserveIn, reserveOut, reserveThird, amountIn)
+  return q.amountOut
+}
+
+function quoteLocalDetailed(reserveInN: number, reserveOutN: number, reserveThirdN: number, amountInN: number) {
+  const reserveIn = BigInt(Math.floor(reserveInN))
+  const reserveOut = BigInt(Math.floor(reserveOutN))
+  const reserveThird = BigInt(Math.floor(reserveThirdN))
+  const amountIn = BigInt(Math.floor(amountInN))
+  const scale = 10_000n
+
+  const result = {
+    amountOut: 0,
+    feeBps: 0,
+    dominanceBps: 0,
+    couplingAdjustment: 0,
+  }
+
+  if (reserveIn <= 0n || reserveOut <= 0n || reserveThird <= 1n || amountIn <= 0n) return result
+  if (reserveIn < 20n || amountIn > reserveIn / 20n) return result
+
+  const sq = (x: bigint) => x * x
+  const inv = sq(reserveIn) + sq(reserveOut) + sq(reserveThird)
+  const maxSq = [sq(reserveIn), sq(reserveOut), sq(reserveThird)].reduce((a, b) => (a > b ? a : b), 0n)
+  const dom = Number((maxSq * scale) / inv)
+  if (dom > 6400) return result
+
+  let fee = 30
+  if (dom > 3400) fee = Math.min(100, 30 + Math.floor(((dom - 3400) * 70) / 3000))
+  const amountInAfterFee = (amountIn * BigInt(10_000 - fee)) / scale
+  if (amountInAfterFee <= 0n) return result
+
   const newReserveIn = reserveIn + amountInAfterFee
+  let base = (reserveThird * amountInAfterFee) / (reserveIn * 20n)
+  if (base <= 0n) base = 1n
+  let deltaThird = (base * (10_000n + BigInt(dom))) / scale
+  if (deltaThird <= 0n) deltaThird = 1n
+  if (deltaThird >= reserveThird) deltaThird = reserveThird - 1n
+  const newReserveThird = reserveThird - deltaThird
 
-  const invariantBefore =
-    reserveIn * reserveIn +
-    reserveOut * reserveOut +
-    reserveThird * reserveThird
+  const targetOutSq = inv - sq(newReserveIn) - sq(newReserveThird)
+  if (targetOutSq <= 0n) return result
 
-  const targetOutSquared =
-    invariantBefore -
-    newReserveIn * newReserveIn -
-    reserveThird * reserveThird
+  const sqrtFloor = (n: bigint) => {
+    if (n < 2n) return n
+    let x0 = n
+    let x1 = (x0 + n / x0) / 2n
+    while (x1 < x0) {
+      x0 = x1
+      x1 = (x0 + n / x0) / 2n
+    }
+    return x0
+  }
+  const newReserveOut = sqrtFloor(targetOutSq)
+  if (newReserveOut > reserveOut) return result
 
-  if (targetOutSquared < 0) return 0
-
-  const newReserveOut = Math.floor(Math.sqrt(targetOutSquared))
-  if (newReserveOut > reserveOut) return 0
-  return reserveOut - newReserveOut
+  return {
+    amountOut: Number(reserveOut - newReserveOut),
+    feeBps: fee,
+    dominanceBps: dom,
+    couplingAdjustment: Number(deltaThird),
+  }
 }
 
 function sleep(ms: number) {
@@ -114,6 +158,13 @@ export default function SwapPage() {
     'Missing frontend env config. Set NEXT_PUBLIC_AMM_APP_ID and NEXT_PUBLIC_ASSET_A_ID/B_ID/C_ID in Vercel.'
 
   const estimateOut = useMemo(() => quoteLocal(pool, assetInId, assetOutId, amountIn), [pool, assetInId, assetOutId, amountIn])
+  const thirdAssetId = useMemo(() => [assets[0].id, assets[1].id, assets[2].id].find((id) => id !== assetInId && id !== assetOutId) ?? 0, [assetInId, assetOutId])
+  const quoteDetails = useMemo(() => {
+    const reserveInLocal = pickReserve(pool, assetInId)
+    const reserveOutLocal = pickReserve(pool, assetOutId)
+    const reserveThirdLocal = thirdAssetId ? pickReserve(pool, thirdAssetId) : 0
+    return quoteLocalDetailed(reserveInLocal, reserveOutLocal, reserveThirdLocal, amountIn)
+  }, [pool, assetInId, assetOutId, thirdAssetId, amountIn])
   const hydratedAddress = mounted ? activeAddress : null
   const hydratedWallets = mounted ? sortedWallets : []
   const reserveIn = useMemo(() => pickReserve(pool, assetInId), [pool, assetInId])
@@ -121,6 +172,10 @@ export default function SwapPage() {
   const spotPrice = reserveIn > 0 ? reserveOut / reserveIn : 0
   const executionPrice = amountIn > 0 ? estimateOut / amountIn : 0
   const priceImpactPct = spotPrice > 0 ? Math.max(0, ((spotPrice - executionPrice) / spotPrice) * 100) : 0
+  const allSq = useMemo(() => [pool.reserveA * pool.reserveA, pool.reserveB * pool.reserveB, pool.reserveC * pool.reserveC], [pool])
+  const invariantNow = useMemo(() => allSq[0] + allSq[1] + allSq[2], [allSq])
+  const dominanceNowBps = useMemo(() => (invariantNow > 0 ? Math.floor((Math.max(allSq[0], allSq[1], allSq[2]) * 10000) / invariantNow) : 0), [allSq, invariantNow])
+  const isImbalanced = dominanceNowBps >= 5800
   const missingOptIns = useMemo(
     () => configuredAssets.filter((asset) => !optedAssetIds.includes(asset.id)),
     [configuredAssets, optedAssetIds],
@@ -370,8 +425,9 @@ export default function SwapPage() {
   return (
     <main>
       <h1>Tri-Asset AMM (TestNet)</h1>
-      <p>Unified pool for Asset A / Asset B / Asset C with exact-input swaps.</p>
-      <p>Orbital-style invariant: A² + B² + C²</p>
+      <p>Orbital-inspired geometric AMM</p>
+      <p>Dynamic 3-asset coupling enabled</p>
+      <p>Invariant: A² + B² + C²</p>
 
       <div className="card">
         {hasConfigError && <div className="warning">{configErrorMessage}</div>}
@@ -454,8 +510,11 @@ export default function SwapPage() {
         <p>Estimated Output: <b>{estimateOut}</b></p>
         <p>Price Preview: 1 in ≈ {pricePreview} out</p>
         <p>Estimated Price Impact: {priceImpactPct.toFixed(2)}%</p>
+        <p>Effective Fee (dynamic): {quoteDetails.feeBps} bps</p>
+        <p>Third Reserve Adjustment (est): {quoteDetails.couplingAdjustment}</p>
         <div className="warning">Swaps are rounded down. Execution fails if output is below minimum after slippage protection.</div>
-        {priceImpactPct > 1 && <div className="warning">Price impact warning: this trade meaningfully moves pool price.</div>}
+        {isImbalanced && <div className="warning">Imbalance warning: reserve dominance is high ({(dominanceNowBps / 100).toFixed(2)}%).</div>}
+        {priceImpactPct >= 2.5 && <div className="warning">Price impact warning: this trade meaningfully moves pool price.</div>}
 
         <div style={{ marginTop: 14 }}>
           <button onClick={() => swap().catch((e) => setStatus(e.message))}>Swap Exact In</button>
@@ -468,6 +527,7 @@ export default function SwapPage() {
         <p>Asset B ({assets[1].id}): {pool.reserveB}</p>
         <p>Asset C ({assets[2].id}): {pool.reserveC}</p>
         <p>feeBps: {pool.feeBps}</p>
+        <p>Reserve Health: {dominanceNowBps <= 5800 ? 'Healthy' : 'Stressed'} ({(dominanceNowBps / 100).toFixed(2)}% dominance)</p>
       </div>
 
       <div className="card">

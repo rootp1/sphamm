@@ -53,6 +53,7 @@ export class TriAssetAmm extends Contract {
     assert(assetA > 0 && assetB > 0 && assetC > 0, 'invalid asset ids')
     assert(assetA !== assetB && assetA !== assetC && assetB !== assetC, 'duplicate assets')
     assert(amountA > 0 && amountB > 0 && amountC > 0, 'invalid initial amounts')
+    assert(amountA <= 100_000_000 && amountB <= 100_000_000 && amountC <= 100_000_000, 'reserve cap exceeded')
     assert(feeBps <= 1000, 'fee too high')
 
     assert(Global.groupSize === 4, 'invalid group size')
@@ -100,11 +101,10 @@ export class TriAssetAmm extends Contract {
     assert(this.isPoolAsset(assetOutId), 'assetOut unsupported')
     assert(assetOutId !== assetInId, 'same asset pair invalid')
 
-    const amountInAfterFee = this.applyFee(amountIn)
     const reserveIn = this.getReserveByAssetId(assetInId)
     const reserveOut = this.getReserveByAssetId(assetOutId)
     const reserveThird = this.getThirdReserveByAssetIds(assetInId, assetOutId)
-    const [amountOut] = this.solveOrbitalSwap(reserveIn, reserveOut, reserveThird, amountInAfterFee)
+    const [amountOut] = this.quoteOutput(reserveIn, reserveOut, reserveThird, amountIn)
     return amountOut
   }
 
@@ -128,16 +128,16 @@ export class TriAssetAmm extends Contract {
     assert(this.isPoolAsset(assetOutId), 'assetOut unsupported')
     assert(assetOutId !== assetInId, 'output asset must differ')
 
-    const amountInAfterFee = this.applyFee(amountIn)
     const reserveIn = this.getReserveByAssetId(assetInId)
     const reserveOut = this.getReserveByAssetId(assetOutId)
     const reserveThird = this.getThirdReserveByAssetIds(assetInId, assetOutId)
+    const thirdAssetId = this.getThirdAssetIdByPair(assetInId, assetOutId)
 
-    const [amountOut, newReserveIn, newReserveOut] = this.solveOrbitalSwap(
+    const [amountOut, newReserveIn, newReserveOut, newReserveThird] = this.quoteOutput(
       reserveIn,
       reserveOut,
       reserveThird,
-      amountInAfterFee,
+      amountIn,
     )
 
     assert(amountOut >= minAmountOut, 'slippage exceeded')
@@ -147,6 +147,7 @@ export class TriAssetAmm extends Contract {
 
     this.setReserveByAssetId(assetInId, newReserveIn)
     this.setReserveByAssetId(assetOutId, newReserveOut)
+    this.setReserveByAssetId(thirdAssetId, newReserveThird)
 
     itxn
       .assetTransfer({
@@ -196,39 +197,60 @@ export class TriAssetAmm extends Contract {
     this.paused.value = false
   }
 
-  private applyFee(amountIn: uint64): uint64 {
-    const feeFactor: uint64 = 10_000 - this.feeBps.value
+  private applyFee(amountIn: uint64, feeBps: uint64): uint64 {
+    const feeFactor: uint64 = 10_000 - feeBps
     return (amountIn * feeFactor) / 10_000
   }
 
-  private solveOrbitalSwap(
+  private quoteOutput(
     reserveIn: uint64,
     reserveOut: uint64,
     reserveThird: uint64,
-    amountInAfterFee: uint64,
-  ): [uint64, uint64, uint64] {
+    amountIn: uint64,
+  ): [uint64, uint64, uint64, uint64] {
     assert(reserveIn > 0 && reserveOut > 0 && reserveThird > 0, 'empty reserves')
+    assert(amountIn > 0, 'amountIn must be positive')
+    assert(reserveIn <= 100_000_000 && reserveOut <= 100_000_000 && reserveThird <= 100_000_000, 'reserve cap exceeded')
+    assert(reserveIn >= 20, 'reserve too small for max swap')
+    assert(amountIn <= reserveIn / 20, 'swap exceeds max trade size')
 
-    const kBefore = this.computeOrbitalInvariant(reserveIn, reserveOut, reserveThird)
+    const kBefore = this.invariant(reserveIn, reserveOut, reserveThird)
+    this.validatePoolHealth(reserveIn, reserveOut, reserveThird, kBefore)
+    const feeBps = this.computeDynamicFee(reserveIn, reserveOut, reserveThird, kBefore)
+    const amountInAfterFee = this.applyFee(amountIn, feeBps)
+    assert(amountInAfterFee > 0, 'amountIn too small after fee')
     const newReserveIn: uint64 = reserveIn + amountInAfterFee
     assert(newReserveIn >= reserveIn, 'reserve overflow')
+    assert(newReserveIn <= 100_000_000, 'reserve cap exceeded')
+
+    const dominanceBps = this.computeDominanceBps(reserveIn, reserveOut, reserveThird, kBefore)
+    const couplingAdjustment = this.computeCouplingAdjustment(reserveIn, reserveThird, amountInAfterFee, dominanceBps)
+    const newReserveThird = this.safeSub(reserveThird, couplingAdjustment)
+    assert(newReserveThird > 0, 'third reserve depleted')
+    assert(newReserveThird <= 100_000_000, 'reserve cap exceeded')
 
     const newReserveInSq = this.safeSquare(newReserveIn)
-    const reserveThirdSq = this.safeSquare(reserveThird)
+    const newReserveThirdSq = this.safeSquare(newReserveThird)
 
     assert(kBefore >= newReserveInSq, 'invariant exhausted by input')
-    const remainingAfterInput: uint64 = kBefore - newReserveInSq
-    assert(remainingAfterInput >= reserveThirdSq, 'invariant exhausted by third reserve')
+    const remainingAfterInput: uint64 = this.safeSub(kBefore, newReserveInSq)
+    assert(remainingAfterInput >= newReserveThirdSq, 'invariant exhausted by third reserve')
 
-    const targetOutSq: uint64 = remainingAfterInput - reserveThirdSq
-    const newReserveOut: uint64 = this.sqrtFloor(targetOutSq)
+    const targetOutSq: uint64 = this.safeSub(remainingAfterInput, newReserveThirdSq)
+    const newReserveOut: uint64 = this.safeSqrt(targetOutSq)
 
     assert(reserveOut >= newReserveOut, 'invalid output reserve')
-    const amountOut: uint64 = reserveOut - newReserveOut
-    return [amountOut, newReserveIn, newReserveOut]
+    const amountOut: uint64 = this.safeSub(reserveOut, newReserveOut)
+    assert(amountOut > 0, 'amountOut zero')
+    assert(amountOut < reserveOut, 'output would drain reserve')
+    assert(newReserveOut <= 100_000_000, 'reserve cap exceeded')
+
+    const kAfter = this.invariant(newReserveIn, newReserveOut, newReserveThird)
+    this.validatePoolHealth(newReserveIn, newReserveOut, newReserveThird, kAfter)
+    return [amountOut, newReserveIn, newReserveOut, newReserveThird]
   }
 
-  private computeOrbitalInvariant(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
+  private invariant(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
     const reserveASq = this.safeSquare(reserveA)
     const reserveBSq = this.safeSquare(reserveB)
     const reserveCSq = this.safeSquare(reserveC)
@@ -242,13 +264,64 @@ export class TriAssetAmm extends Contract {
   }
 
   private safeSquare(value: uint64): uint64 {
+    assert(value <= 4_000_000_000, 'square bound exceeded')
     const squared: uint64 = value * value
     assert(value === 0 || squared / value === value, 'square overflow')
     return squared
   }
 
-  private sqrtFloor(value: uint64): uint64 {
+  private safeSub(a: uint64, b: uint64): uint64 {
+    assert(a >= b, 'underflow')
+    return a - b
+  }
+
+  private safeSqrt(value: uint64): uint64 {
     return op.sqrt(value)
+  }
+
+  private computeDominanceBps(reserveA: uint64, reserveB: uint64, reserveC: uint64, kValue: uint64): uint64 {
+    assert(kValue > 0, 'invalid invariant')
+    const aSq = this.safeSquare(reserveA)
+    const bSq = this.safeSquare(reserveB)
+    const cSq = this.safeSquare(reserveC)
+    let maxSq = aSq
+    if (bSq > maxSq) maxSq = bSq
+    if (cSq > maxSq) maxSq = cSq
+    return (maxSq * 10_000) / kValue
+  }
+
+  private validatePoolHealth(reserveA: uint64, reserveB: uint64, reserveC: uint64, kValue: uint64): void {
+    const dominanceBps = this.computeDominanceBps(reserveA, reserveB, reserveC, kValue)
+    assert(dominanceBps <= 6_400, 'dominance threshold exceeded')
+  }
+
+  private computeDynamicFee(reserveA: uint64, reserveB: uint64, reserveC: uint64, kValue: uint64): uint64 {
+    const dominanceBps = this.computeDominanceBps(reserveA, reserveB, reserveC, kValue)
+    if (dominanceBps <= 3_400) return 30
+    if (dominanceBps >= 6_400) return 100
+    const excess = dominanceBps - 3_400
+    return 30 + (excess * 70) / 3_000
+  }
+
+  private computeCouplingAdjustment(
+    reserveIn: uint64,
+    reserveThird: uint64,
+    amountInAfterFee: uint64,
+    dominanceBps: uint64,
+  ): uint64 {
+    assert(reserveIn > 0, 'reserveIn zero')
+    assert(reserveThird > 1, 'third reserve too small')
+    const denom: uint64 = reserveIn * 20
+    assert(denom > reserveIn, 'denominator overflow')
+    let base = (reserveThird * amountInAfterFee) / denom
+    if (base === 0) base = 1
+
+    let weighted = (base * (10_000 + dominanceBps)) / 10_000
+    if (weighted === 0) weighted = 1
+
+    const maxAdjust = reserveThird - 1
+    if (weighted > maxAdjust) return maxAdjust
+    return weighted
   }
 
   private getThirdReserveByAssetIds(assetInId: uint64, assetOutId: uint64): uint64 {
@@ -261,6 +334,16 @@ export class TriAssetAmm extends Contract {
     return this.reserveC.value
   }
 
+  private getThirdAssetIdByPair(assetInId: uint64, assetOutId: uint64): uint64 {
+    assert(this.isPoolAsset(assetInId), 'assetIn unsupported')
+    assert(this.isPoolAsset(assetOutId), 'assetOut unsupported')
+    assert(assetInId !== assetOutId, 'asset ids must differ')
+
+    if (assetInId !== this.assetAId.value && assetOutId !== this.assetAId.value) return this.assetAId.value
+    if (assetInId !== this.assetBId.value && assetOutId !== this.assetBId.value) return this.assetBId.value
+    return this.assetCId.value
+  }
+
   private getReserveByAssetId(assetId: uint64): uint64 {
     assert(this.isPoolAsset(assetId), 'unsupported asset')
     if (assetId === this.assetAId.value) return this.reserveA.value
@@ -270,6 +353,7 @@ export class TriAssetAmm extends Contract {
 
   private setReserveByAssetId(assetId: uint64, value: uint64): void {
     assert(this.isPoolAsset(assetId), 'unsupported asset')
+    assert(value <= 100_000_000, 'reserve cap exceeded')
     if (assetId === this.assetAId.value) {
       this.reserveA.value = value
       return

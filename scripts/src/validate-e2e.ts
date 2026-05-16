@@ -13,6 +13,10 @@ type ScenarioResult = {
   detail: string
 }
 
+function readUintState(globalState: any[], key: string): number {
+  return Number(globalState.find((x: any) => Buffer.from(x.key, 'base64').toString('utf8') === key)?.value?.uint ?? 0)
+}
+
 async function deployFreshApp(algod: algosdk.Algodv2, deployer: algosdk.Account) {
   const approvalTealPath = path.resolve(process.cwd(), '../contracts/src/artifacts/TriAssetAmm.approval.teal')
   const clearTealPath = path.resolve(process.cwd(), '../contracts/src/artifacts/TriAssetAmm.clear.teal')
@@ -376,6 +380,21 @@ async function main() {
   )
 
   results.push(
+    await expectFailure('swap >5% reserveIn fails', async () => {
+      const tx0 = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({ sender: deployer.addr, receiver: appAddress, amount: 60, assetIndex: assetAId, suggestedParams: sp })
+      const tx1 = appNoOp(
+        deployer.addr,
+        appId,
+        [swapMethod.getSelector(), encU64(assetAId), encU64(60), encU64(1)],
+        { ...sp, fee: 5_000n },
+        [assetBId],
+        5_000n,
+      )
+      await runSigned([tx0, tx1], deployer)
+    }),
+  )
+
+  results.push(
     await expectFailure('quote same in/out fails', async () => {
       const tx = appNoOp(deployer.addr, appId, [quoteMethod.getSelector(), encU64(assetAId), encU64(10)], sp, [assetAId])
       await runSigned([tx], deployer)
@@ -391,6 +410,10 @@ async function main() {
 
   results.push(
     await expectSuccess('swap valid succeeds', async () => {
+      const appBefore = await algod.getApplicationByID(appId).do()
+      const gsBefore = appBefore.params.globalState ?? []
+      const reserveCBefore = readUintState(gsBefore, 'reserveC')
+
       const tx0 = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({ sender: deployer.addr, receiver: appAddress, amount: 10, assetIndex: assetAId, suggestedParams: sp })
       const tx1 = appNoOp(
         deployer.addr,
@@ -401,6 +424,13 @@ async function main() {
         5_000n,
       )
       await runSigned([tx0, tx1], deployer)
+
+      const appAfter = await algod.getApplicationByID(appId).do()
+      const gsAfter = appAfter.params.globalState ?? []
+      const reserveCAfter = readUintState(gsAfter, 'reserveC')
+      if (reserveCAfter >= reserveCBefore) {
+        throw new Error('third reserve did not decrease during swap')
+      }
     }),
   )
 

@@ -48,9 +48,10 @@ Simplified deterministic integer math (round down only):
 1. `amountInAfterFee = floor(amountIn * (10000 - feeBps) / 10000)`
 2. Orbital-style geometric invariant:
    - `K = reserveA^2 + reserveB^2 + reserveC^2`
-3. For a swap `assetIn -> assetOut` with third reserve fixed:
+3. For a swap `assetIn -> assetOut` with dynamic third-reserve coupling:
    - `newReserveIn = reserveIn + amountInAfterFee`
-   - `newReserveOut = floor(sqrt(K - newReserveIn^2 - reserveThird^2))`
+   - `newReserveThird = reserveThird - couplingAdjustment`
+   - `newReserveOut = floor(sqrt(K - newReserveIn^2 - newReserveThird^2))`
    - `amountOut = reserveOut - newReserveOut`
 4. Require `amountOut >= minAmountOut`
 5. Update reserves and send output ASA via inner tx
@@ -67,13 +68,36 @@ Why this differs from constant-product:
 
 - No pairwise `x*y=k` solve is used
 - Swap output is derived from global 3-asset geometry
-- Third asset reserve directly constrains each swap quote
+- Third asset reserve directly constrains and updates during each swap quote
+
+## Dynamic Geometric Coupling
+
+If a swap updates only two reserves while keeping the third reserve fixed, the geometry may still look 3D, but pricing behavior can collapse toward pairwise dynamics for that trade path.
+
+This upgrade prevents that collapse by forcing the third reserve to move on every exact-input swap using deterministic integer coupling logic:
+
+- Invariant: `K = A^2 + B^2 + C^2`
+- Input reserve increases after fee
+- Third reserve decreases by a deterministic coupling adjustment
+- Output reserve is solved from the remaining invariant budget
+
+Why this matters:
+
+- The third reserve is no longer just symbolic in the equation.
+- It materially changes execution output for each trade.
+- Quotes/swaps are now true 3-reserve coupled geometric pricing, still AVM-safe and integer-only.
+
+Positioning:
+
+- Orbital-inspired geometric AMM design
+- Not full Paradigm Orbital
+- No ticks / concentrated or range-based liquidity
 
 Limitations (intentional MVP scope):
 
 - Integer-only (uint64) math with floor rounding
 - No ticks, concentrated ranges, or dynamic curvature controls
-- Simplified fee handling and no LP share accounting yet
+- Dynamic imbalance fee (0.3% to 1.0%) and no LP share accounting yet
 
 ## Prerequisites
 
